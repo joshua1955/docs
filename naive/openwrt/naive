@@ -1,0 +1,6 @@
+# etc/config/naive
+config naive 'main'
+      option enabled '1'
+      option listen 'socks://127.0.0.1:1080'
+      option proxy 'https://user:pass@example.com'
+
