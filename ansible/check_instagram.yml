@@ -1,0 +1,9 @@
+---
+- name: Check Instagram through routers
+  hosts: routers
+  gather_facts: false
+
+  tasks:
+    - name: Check Instagram finished marker
+      ansible.builtin.raw: "curl https://instagram.com -L --silent | grep finished"
+      changed_when: false

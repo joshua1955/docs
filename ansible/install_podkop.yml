@@ -1,0 +1,13 @@
+---
+- name: Install Podkop on OpenWrt routers
+  hosts: routers
+  gather_facts: false
+
+  tasks:
+    - name: Ensure wget command is available
+      ansible.builtin.raw: "command -v wget >/dev/null 2>&1 || (opkg update && opkg install wget-ssl)"
+      changed_when: false
+
+    - name: Run Podkop installer
+      ansible.builtin.raw: "wget -O - https://raw.githubusercontent.com/itdoginfo/podkop/refs/heads/main/install.sh | sh"
+      changed_when: true

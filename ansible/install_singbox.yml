@@ -1,0 +1,153 @@
+---
+- name: Install sing-box on OpenWrt routers
+  hosts: routers
+  gather_facts: false
+
+  vars:
+    sing_box_repo: SagerNet/sing-box
+    sing_box_binary_path: /usr/bin/sing-box
+
+  tasks:
+    - name: Read OpenWrt architecture
+      ansible.builtin.raw: ". /etc/os-release && printf '%s\n' \"$OPENWRT_ARCH\""
+      register: openwrt_arch
+      changed_when: false
+      failed_when: openwrt_arch.stdout | trim == "" 
+
+    - name: Read OpenWrt major version
+      ansible.builtin.raw: ". /etc/os-release && printf '%s\n' \"${VERSION_ID%%.*}\""
+      register: openwrt_version_major
+      changed_when: false
+      failed_when: not (openwrt_version_major.stdout | trim is match('^[0-9]+$'))
+
+    - name: Read installed sing-box version
+      ansible.builtin.raw: |
+        if [ -x "{{ sing_box_binary_path }}" ]; then
+          "{{ sing_box_binary_path }}" version
+        fi
+      register: sing_box_installed_version
+      changed_when: false
+      failed_when: false
+
+    - name: Extract installed sing-box version number
+      ansible.builtin.set_fact:
+        sing_box_installed_version_number: "{{ (sing_box_installed_version.stdout | regex_search('(?m)^sing-box version\\s+([^\\r\\n]+)', '\\1') | default([''], true))[0] }}"
+    
+    - name: Show installed sing-box version
+      ansible.builtin.debug:
+        msg: "Installed sing-box version: {{ sing_box_installed_version_number | default('not installed', true) }}"
+    
+    - name: Ensure download tool is available
+      ansible.builtin.raw: |
+        changed=0
+
+        if command -v curl >/dev/null 2>&1; then
+          :
+        elif command -v wget >/dev/null 2>&1 && wget --help 2>&1 | grep -q https; then
+          :
+        else
+          if command -v apk >/dev/null 2>&1; then
+            apk update
+            apk add curl
+          elif command -v opkg >/dev/null 2>&1; then
+            if command -v wget >/dev/null 2>&1; then
+              opkg update
+              opkg install wget-ssl
+            else
+              opkg update
+              opkg install curl
+            fi
+          else
+            echo "Neither apk nor opkg package manager is available"
+            exit 1
+          fi
+          changed=1
+        fi
+
+        [ "$changed" -eq 1 ] && echo "__CHANGED__" || true
+      register: sing_box_dependencies
+      changed_when: "'__CHANGED__' in sing_box_dependencies.stdout"
+
+    - name: Find latest sing-box OpenWrt package asset
+      ansible.builtin.raw: |
+        REPO="{{ sing_box_repo }}"
+        ARCH="{{ openwrt_arch.stdout | trim }}"
+        PACKAGE_EXT="{% if (openwrt_version_major.stdout | trim | int) >= 25 %}apk{% else %}ipk{% endif %}"
+        API_URL="https://api.github.com/repos/$REPO/releases/latest"
+
+        if command -v curl >/dev/null 2>&1; then
+          curl -fsSL "$API_URL"
+        else
+          wget -qO- "$API_URL"
+        fi \
+          | grep -oE '"browser_download_url"[^"]*"[^"]+"' \
+          | grep -oE 'https://[^"]+' \
+          | grep -- "sing-box_.*_openwrt_${ARCH}\.${PACKAGE_EXT}$" \
+          | head -n1
+      register: sing_box_asset_url
+      changed_when: false
+      failed_when: sing_box_asset_url.stdout | trim == ""
+
+    - name: Read latest sing-box version from asset name
+      ansible.builtin.set_fact:
+        sing_box_latest_version: "{{ (sing_box_asset_url.stdout | trim | regex_search('sing-box_([^_/]+)_openwrt_', '\\1'))[0] }}"
+    
+    - name: Show latest sing-box version
+      ansible.builtin.debug:
+        msg: "Latest sing-box version: {{ sing_box_latest_version }}"
+    
+    - name: Download and install sing-box package
+      ansible.builtin.raw: |
+        set -eu
+
+        PACKAGE_EXT="{% if (openwrt_version_major.stdout | trim | int) >= 25 %}apk{% else %}ipk{% endif %}"
+        PACKAGE_FILE="sing-box.$PACKAGE_EXT"
+
+        if [ "$PACKAGE_EXT" = "apk" ]; then
+          command -v apk >/dev/null 2>&1 || {
+            echo "apk package manager is required to install .apk packages"
+            exit 1
+          }
+        else
+          command -v opkg >/dev/null 2>&1 || {
+            echo "opkg package manager is required to install .ipk packages"
+            exit 1
+          }
+        fi
+
+        TMPDIR="$(mktemp -d)"
+        trap 'rm -rf "$TMPDIR"' EXIT
+        cd "$TMPDIR"
+
+        ASSET_URL="{{ sing_box_asset_url.stdout | trim }}"
+
+        if command -v curl >/dev/null 2>&1; then
+          curl -fsSL -o "$PACKAGE_FILE" "$ASSET_URL"
+        else
+          wget -qO "$PACKAGE_FILE" "$ASSET_URL"
+        fi
+
+        if [ "$PACKAGE_EXT" = "apk" ]; then
+          apk add --allow-untrusted "./$PACKAGE_FILE"
+        else
+          opkg install "./$PACKAGE_FILE"
+        fi
+      register: sing_box_install
+      changed_when: true
+      when: sing_box_installed_version_number != sing_box_latest_version
+
+    - name: Restart Podkop after sing-box update
+      ansible.builtin.raw: podkop restart
+      changed_when: true
+      when:
+        - sing_box_install is changed
+
+    - name: Check installed sing-box version
+      ansible.builtin.raw: "{{ sing_box_binary_path }} version"
+      register: sing_box_version
+      changed_when: false
+
+    - name: Show final sing-box version
+      ansible.builtin.debug:
+        msg: "Installed sing-box version: {{ (sing_box_version.stdout | regex_search('(?m)^sing-box version\\s+([^\\r\\n]+)', '\\1') | default(['unknown'], true))[0] }}"
+    
